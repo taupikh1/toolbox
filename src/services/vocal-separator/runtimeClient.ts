@@ -11,6 +11,7 @@ import type {
   RuntimeStatus,
   SeparateOptionsPayload,
 } from './workerMessages';
+import { isIntermediateResponse } from './workerMessages';
 
 export type { DeviceCapabilities, ExecutionProvider, RuntimeStatus };
 
@@ -130,6 +131,9 @@ export class OrtRuntimeClient {
       // requestId-scoped
       const requestId = (msg as { requestId?: string }).requestId;
       if (!requestId) return;
+      // PROGRESS / MODEL_PROGRESS hanyalah kabar perantara, bukan jawaban akhir.
+      // Jangan resolve/hapus pending, tunggu READY / MODEL_READY / ERROR.
+      if (isIntermediateResponse(msg)) return;
       const p = this.pending.get(requestId);
       if (!p) return;
       clearTimeout(p.timer);

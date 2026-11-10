@@ -172,3 +172,13 @@ export function validateSeparatePayload(msg: {
   if (mode !== 'vocals' && mode !== 'instrumental' && mode !== 'both') return 'INVALID_OPTIONS';
   return null;
 }
+
+/**
+ * Pesan perantara (progress) memakai requestId yang sama dengan request aslinya,
+ * tetapi BUKAN jawaban akhir. Client tidak boleh menyelesaikan promise dengan pesan ini.
+ */
+export function isIntermediateResponse(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const t = (data as { type?: string }).type;
+  return t === 'PROGRESS' || t === 'MODEL_PROGRESS';
+}
