@@ -1,0 +1,1 @@
+import{r as o,j as i}from"./index-DxF2uKvK.js";import{c as l}from"./utils-CStbxu4I.js";function p({text:a,label:t="Salin",primary:e=!1,small:n=!1}){const[r,s]=o.useState("");return i.jsx("button",{className:"btn"+(e?" primary":"")+(n?" sm":""),disabled:!a,onClick:async()=>{s(await l(a)?"Tersalin ✓":"Gagal menyalin"),setTimeout(()=>s(""),1500)},children:r||t})}export{p as C};
