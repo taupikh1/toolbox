@@ -1,0 +1,174 @@
+/**
+ * Message protocol between UI thread and ONNX Runtime worker.
+ * Batch 22B: extended for LOAD_MODEL / SEPARATE / real JOB_* progress.
+ * Every request carries non-empty requestId. Job messages also carry jobId.
+ */
+
+export type RuntimeStatus =
+  | 'NOT_INITIALIZED'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'ERROR'
+  | 'DISPOSED';
+
+export type ExecutionProvider = 'webgpu' | 'wasm' | 'unknown';
+
+export interface DeviceCapabilities {
+  webWorker: boolean;
+  webAssembly: boolean;
+  webGpu: boolean;
+  sharedArrayBuffer: boolean;
+  crossOriginIsolated: boolean;
+  userAgent: string;
+}
+
+export interface ModelInputMeta {
+  names: string[];
+  dims: number[][];
+}
+
+export interface ModelOutputMeta {
+  names: string[];
+  dims: number[][];
+}
+
+export type SeparateOptionsPayload = {
+  outputMode: 'vocals' | 'instrumental' | 'both';
+  quality: 'economy' | 'balanced' | 'good';
+  /** overlap fraction 0..0.5; derived from quality if omitted */
+  overlap?: number;
+};
+
+/** Main → Worker */
+export type WorkerRequest =
+  | { type: 'INIT_RUNTIME'; requestId: string }
+  | { type: 'CHECK_CAPABILITIES'; requestId: string }
+  | { type: 'LOAD_MODEL'; requestId: string; cacheKey: string; provider?: ExecutionProvider }
+  | { type: 'VERIFY_MODEL'; requestId: string; cacheKey: string }
+  | {
+      type: 'SEPARATE';
+      requestId: string;
+      jobId: string;
+      sampleRate: number;
+      channels: Float32Array[];
+      options: SeparateOptionsPayload;
+    }
+  | { type: 'CANCEL'; requestId: string; jobId?: string }
+  | { type: 'DISPOSE'; requestId: string };
+
+/** Worker → Main */
+export type WorkerResponse =
+  | {
+      type: 'READY';
+      requestId: string;
+      provider: ExecutionProvider;
+      ortVersion?: string;
+    }
+  | {
+      type: 'CAPABILITIES';
+      requestId: string;
+      capabilities: DeviceCapabilities;
+      preferredProviders: ExecutionProvider[];
+    }
+  | {
+      type: 'MODEL_PROGRESS';
+      requestId: string;
+      phase: string;
+      percent?: number;
+      message?: string;
+    }
+  | {
+      type: 'MODEL_READY';
+      requestId: string;
+      inputMeta: ModelInputMeta;
+      outputMeta: ModelOutputMeta;
+      provider: ExecutionProvider;
+    }
+  | {
+      type: 'JOB_PROGRESS';
+      jobId: string;
+      phase: string;
+      chunk: number;
+      totalChunks: number;
+      percent: number;
+    }
+  | {
+      type: 'JOB_RESULT';
+      jobId: string;
+      vocals?: Float32Array[];
+      instrumental?: Float32Array[];
+    }
+  | {
+      type: 'JOB_ERROR';
+      jobId: string;
+      code: string;
+      message: string;
+    }
+  | {
+      type: 'JOB_CANCELLED';
+      jobId: string;
+    }
+  | {
+      type: 'PROGRESS';
+      requestId: string;
+      phase: string;
+      percent?: number;
+      message?: string;
+    }
+  | {
+      type: 'ERROR';
+      requestId: string;
+      code: string;
+      message: string;
+    }
+  | {
+      type: 'CANCELLED';
+      requestId: string;
+    }
+  | {
+      type: 'DISPOSED';
+      requestId: string;
+    };
+
+const REQUEST_TYPES = new Set([
+  'INIT_RUNTIME',
+  'CHECK_CAPABILITIES',
+  'LOAD_MODEL',
+  'VERIFY_MODEL',
+  'SEPARATE',
+  'CANCEL',
+  'DISPOSE',
+]);
+
+export function isWorkerRequest(data: unknown): data is WorkerRequest {
+  if (!data || typeof data !== 'object') return false;
+  const t = (data as { type?: string }).type;
+  const id = (data as { requestId?: string }).requestId;
+  if (typeof id !== 'string' || !id) return false;
+  if (typeof t !== 'string' || !REQUEST_TYPES.has(t)) return false;
+  return true;
+}
+
+/** Validate SEPARATE payload; returns error code or null if ok. */
+export function validateSeparatePayload(msg: {
+  sampleRate?: unknown;
+  channels?: unknown;
+  options?: unknown;
+  jobId?: unknown;
+}): string | null {
+  if (typeof msg.jobId !== 'string' || !msg.jobId) return 'INVALID_JOB_ID';
+  if (typeof msg.sampleRate !== 'number' || !(msg.sampleRate > 0)) return 'INVALID_SAMPLE_RATE';
+  if (!Array.isArray(msg.channels) || msg.channels.length < 1 || msg.channels.length > 2) {
+    return 'INVALID_CHANNELS';
+  }
+  const len0 = (msg.channels[0] as Float32Array)?.length;
+  if (typeof len0 !== 'number' || len0 < 1) return 'INVALID_CHANNELS';
+  for (const ch of msg.channels) {
+    if (!(ch instanceof Float32Array) || ch.length !== len0) return 'INVALID_CHANNELS';
+  }
+  const opt = msg.options;
+  if (!opt || typeof opt !== 'object') return 'INVALID_OPTIONS';
+  const mode = (opt as SeparateOptionsPayload).outputMode;
+  if (mode !== 'vocals' && mode !== 'instrumental' && mode !== 'both') return 'INVALID_OPTIONS';
+  return null;
+}
