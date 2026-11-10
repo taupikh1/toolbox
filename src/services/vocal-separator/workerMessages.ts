@@ -182,3 +182,24 @@ export function isIntermediateResponse(data: unknown): boolean {
   const t = (data as { type?: string }).type;
   return t === 'PROGRESS' || t === 'MODEL_PROGRESS';
 }
+
+/**
+ * Cache API: kunci string di-resolve relatif terhadap base URL konteks yang memanggil.
+ * Halaman (modelManager) menyimpan model di "<base-halaman>/<id>", sedangkan Worker
+ * mencari di "<base-script-worker>/<id>", sehingga cache.match(id) di worker meleset.
+ * Fungsi murni ini memilih URL tersimpan yang path-nya berakhir dengan "/<id>".
+ * Mengembalikan indeks, atau -1 bila tidak ada.
+ */
+export function findCachedModelIndex(urls: readonly string[], id: string): number {
+  if (!id) return -1;
+  const suffix = '/' + id;
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      const path = new URL(urls[i]).pathname;
+      if (path.endsWith(suffix)) return i;
+    } catch {
+      /* URL tidak valid, lewati */
+    }
+  }
+  return -1;
+}

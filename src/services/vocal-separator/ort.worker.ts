@@ -12,7 +12,11 @@ import type {
   DeviceCapabilities,
   SeparateOptionsPayload,
 } from './workerMessages';
-import { isWorkerRequest, validateSeparatePayload } from './workerMessages';
+import {
+  isWorkerRequest,
+  validateSeparatePayload,
+  findCachedModelIndex,
+} from './workerMessages';
 import { planChunks, chunkOverlapSamples, accumulateChunk, normalizeOverlap } from './pure/chunkPlanner';
 import { validateModelMarker } from './pure/modelMarker';
 import {
@@ -139,6 +143,22 @@ async function initRuntime(requestId: string): Promise<void> {
   }
 }
 
+/**
+ * Cari model di Cache Storage. cache.match(id) di Worker di-resolve relatif ke URL
+ * script worker (/assets/...), sedangkan halaman menyimpannya relatif ke URL halaman,
+ * jadi harus dicocokkan lewat akhiran path, bukan URL penuh.
+ */
+async function matchModel(cache: Cache, id: string): Promise<Response | undefined> {
+  const direct = await cache.match(id);
+  if (direct) return direct;
+  const reqs = await cache.keys();
+  const idx = findCachedModelIndex(
+    reqs.map((r) => r.url),
+    id,
+  );
+  return idx >= 0 ? cache.match(reqs[idx]) : undefined;
+}
+
 async function loadModel(
   requestId: string,
   cacheKey: string,
@@ -169,7 +189,7 @@ async function loadModel(
 
   try {
     const cache = await caches.open(MODEL_CACHE_NAME);
-    const res = await cache.match(cacheKey || DEFAULT_CACHE_KEY);
+    const res = await matchModel(cache, cacheKey || DEFAULT_CACHE_KEY);
     if (!res) {
       post({
         type: 'ERROR',
@@ -252,7 +272,7 @@ async function loadModel(
 async function verifyModel(requestId: string, cacheKey: string): Promise<void> {
   try {
     const cache = await caches.open(MODEL_CACHE_NAME);
-    const res = await cache.match(cacheKey || DEFAULT_CACHE_KEY);
+    const res = await matchModel(cache, cacheKey || DEFAULT_CACHE_KEY);
     if (!res) {
       post({ type: 'ERROR', requestId, code: 'MODEL_NOT_CACHED', message: 'Not in cache' });
       return;
