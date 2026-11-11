@@ -33,6 +33,28 @@ import {
 
 type OutputMode = 'vocals' | 'instrumental' | 'both';
 
+type SpeedTiming = NonNullable<Awaited<ReturnType<typeof separate>>['timing']>;
+
+const LS_GPU = 'vocalSep.useGpu';
+const LS_OVERLAP = 'vocalSep.overlap';
+const LS_SEG = 'vocalSep.segFrames';
+
+function lsGet(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+function lsSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* ignore */
+  }
+}
+const hasWebGpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
+
 export default function VocalSeparator() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>(vocalModelManager.getStatus());
   const [modelMsg, setModelMsg] = useState<string>('');
@@ -56,6 +78,11 @@ export default function VocalSeparator() {
   const [resultMode, setResultMode] = useState<'ai' | 'fast' | null>(null);
   const [abSource, setAbSource] = useState<AbSource>('original');
   const [suggestFast, setSuggestFast] = useState(false);
+  // Pengaturan kecepatan (lanjutan), diingat antar sesi
+  const [useGpu, setUseGpu] = useState(() => hasWebGpu && lsGet(LS_GPU, '0') === '1');
+  const [overlapChoice, setOverlapChoice] = useState(() => lsGet(LS_OVERLAP, 'auto'));
+  const [segChoice, setSegChoice] = useState(() => lsGet(LS_SEG, 'auto'));
+  const [timing, setTiming] = useState<SpeedTiming | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const tier = detectTier();
@@ -167,6 +194,7 @@ export default function VocalSeparator() {
     setProgress(null);
     setGateWarnings([]);
     setSuggestFast(false);
+    setTiming(null);
     setResultMode(null);
     if (vocalsUrl) URL.revokeObjectURL(vocalsUrl);
     if (instUrl) URL.revokeObjectURL(instUrl);
@@ -196,8 +224,13 @@ export default function VocalSeparator() {
         fastStrength,
         keepBass,
         trimToSec: trim60 ? TRIM_TEST_SEC : undefined,
+        useGpu: useGpu && hasWebGpu,
+        overlapOverride: overlapChoice === 'auto' ? undefined : Number(overlapChoice),
+        segmentFramesOverride: segChoice === 'auto' ? undefined : Number(segChoice),
       });
 
+      setTiming(result.timing ?? null);
+      if (result.mode === 'ai') setRtProvider(ortRuntimeClient.provider);
       setGateWarnings(result.warnings ?? []);
       setResultMode(result.mode);
       if (result.vocals) setVocalsUrl(URL.createObjectURL(result.vocals));
@@ -513,6 +546,66 @@ export default function VocalSeparator() {
           )}
         </div>
 
+        <details style={{ marginBottom: 10, fontSize: 13 }}>
+          <summary style={{ cursor: 'pointer' }}>Pengaturan kecepatan (lanjutan)</summary>
+          <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+            <label>
+              <input
+                type="checkbox"
+                checked={useGpu}
+                disabled={busy || fastMode || !hasWebGpu}
+                onChange={(e) => {
+                  setUseGpu(e.target.checked);
+                  lsSet(LS_GPU, e.target.checked ? '1' : '0');
+                }}
+              />{' '}
+              Pakai GPU (WebGPU) — eksperimental
+            </label>
+            <span className="small muted">
+              {hasWebGpu
+                ? 'Bisa jauh lebih cepat. Kalau gagal, otomatis jatuh ke CPU. Cek "Provider" di kartu ONNX Runtime setelah proses.'
+                : 'Browser ini belum mendukung WebGPU.'}
+            </span>
+            <label>
+              Overlap antar potongan:{' '}
+              <select
+                value={overlapChoice}
+                disabled={busy || fastMode}
+                onChange={(e) => {
+                  setOverlapChoice(e.target.value);
+                  lsSet(LS_OVERLAP, e.target.value);
+                }}
+              >
+                <option value="auto">Otomatis (sesuai kualitas)</option>
+                <option value="0.5">0.50 (paling halus, paling lambat)</option>
+                <option value="0.35">0.35</option>
+                <option value="0.25">0.25 (≈1,5× lebih cepat dari 0.50)</option>
+                <option value="0.15">0.15 (cepat, sambungan bisa terdengar)</option>
+              </select>
+            </label>
+            <label>
+              Ukuran potongan:{' '}
+              <select
+                value={segChoice}
+                disabled={busy || fastMode}
+                onChange={(e) => {
+                  setSegChoice(e.target.value);
+                  lsSet(LS_SEG, e.target.value);
+                }}
+              >
+                <option value="auto">Otomatis (sesuai tier)</option>
+                <option value="64">64 (hemat memori)</option>
+                <option value="128">128 (lebih sedikit sambungan, butuh memori lebih)</option>
+                <option value="256">256 (paling boros memori)</option>
+              </select>
+            </label>
+            <span className="small muted">
+              Potongan lebih besar = lebih sedikit sambungan, jadi overlap bisa diturunkan tanpa kualitas turun
+              banyak. Kalau halaman mati mendadak saat proses, kembalikan ke Otomatis / 64.
+            </span>
+          </div>
+        </details>
+
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <button
             className="btn primary"
@@ -535,6 +628,15 @@ export default function VocalSeparator() {
         {progressText && (
           <p className="small" style={{ marginTop: 8 }}>
             {progressText}
+          </p>
+        )}
+
+        {timing && (
+          <p className="small muted" style={{ marginTop: 6 }}>
+            Selesai dalam {(timing.wallMs / 1000).toFixed(1)} dtk · model {(timing.inferMs / 1000).toFixed(1)} dtk ·
+            STFT/iSTFT {(timing.dspMs / 1000).toFixed(1)} dtk · {timing.chunks} potongan ({timing.segmentFrames} frame,
+            overlap {timing.overlap.toFixed(2)}) · provider {timing.provider.toUpperCase()}
+            {timing.usedGpuRequest && timing.provider !== 'webgpu' ? ' (GPU diminta)' : ''}
           </p>
         )}
 
