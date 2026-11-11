@@ -10,10 +10,11 @@ import type {
   ExecutionProvider,
   RuntimeStatus,
   SeparateOptionsPayload,
+  SeparationTiming,
 } from './workerMessages';
 import { isIntermediateResponse } from './workerMessages';
 
-export type { DeviceCapabilities, ExecutionProvider, RuntimeStatus };
+export type { DeviceCapabilities, ExecutionProvider, RuntimeStatus, SeparationTiming };
 
 type Pending = {
   resolve: (v: WorkerResponse) => void;
@@ -31,6 +32,7 @@ type JobHandlers = {
   resolve: (v: {
     vocals?: Float32Array[];
     instrumental?: Float32Array[];
+    timing?: SeparationTiming;
   }) => void;
   reject: (e: Error) => void;
 };
@@ -49,6 +51,8 @@ export class OrtRuntimeClient {
   private _capabilities: DeviceCapabilities | null = null;
   private _lastError: string | null = null;
   private _modelReady = false;
+  /** Provider yang diminta saat model terakhir dimuat. */
+  private _loadedPref: 'webgpu' | 'wasm' | null = null;
 
   get status(): RuntimeStatus {
     return this._status;
@@ -115,6 +119,7 @@ export class OrtRuntimeClient {
           job.resolve({
             vocals: (msg as { vocals?: Float32Array[] }).vocals,
             instrumental: (msg as { instrumental?: Float32Array[] }).instrumental,
+            timing: (msg as { timing?: SeparationTiming }).timing,
           });
         } else if (msg.type === 'JOB_CANCELLED') {
           job.reject(new Error('CANCELLED'));
@@ -146,6 +151,7 @@ export class OrtRuntimeClient {
       this.rejectAll(this._lastError);
       this.worker = null;
       this._modelReady = false;
+      this._loadedPref = null;
     };
     return this.worker;
   }
@@ -196,13 +202,14 @@ export class OrtRuntimeClient {
     }
   }
 
-  async loadModel(cacheKey = 'inst-hq-3-dynt'): Promise<void> {
+  async loadModel(cacheKey = 'inst-hq-3-dynt', provider?: ExecutionProvider): Promise<void> {
     const res = await this.send(
-      { type: 'LOAD_MODEL', requestId: newId(), cacheKey },
+      { type: 'LOAD_MODEL', requestId: newId(), cacheKey, provider },
       120_000,
     );
     if (res.type === 'MODEL_READY') {
       this._modelReady = true;
+      this._loadedPref = provider === 'webgpu' ? 'webgpu' : 'wasm';
       this._provider = res.provider;
       return;
     }
@@ -213,6 +220,16 @@ export class OrtRuntimeClient {
     throw new Error('Unexpected response for LOAD_MODEL');
   }
 
+  /**
+   * Pastikan model termuat dengan provider yang diminta. Bila model sudah termuat
+   * dengan provider yang sama, tidak melakukan apa-apa; bila beda (CPU <-> GPU),
+   * worker melepas session lama dan membuat yang baru.
+   */
+  async ensureModel(cacheKey: string, provider: 'webgpu' | 'wasm'): Promise<void> {
+    if (this._modelReady && this._loadedPref === provider) return;
+    await this.loadModel(cacheKey, provider);
+  }
+
   separate(opts: {
     sampleRate: number;
     channels: Float32Array[];
@@ -220,7 +237,7 @@ export class OrtRuntimeClient {
     transfer?: ArrayBuffer[];
     onJobProgress?: JobHandlers['onProgress'];
     signal?: AbortSignal;
-  }): Promise<{ vocals?: Float32Array[]; instrumental?: Float32Array[] }> {
+  }): Promise<{ vocals?: Float32Array[]; instrumental?: Float32Array[]; timing?: SeparationTiming }> {
     const jobId = newId();
     const requestId = newId();
     const w = this.ensureWorker();
@@ -291,6 +308,7 @@ export class OrtRuntimeClient {
     this.worker = null;
     this._status = 'NOT_INITIALIZED';
     this._modelReady = false;
+    this._loadedPref = null;
     this._provider = 'unknown';
   }
 
@@ -315,6 +333,7 @@ export class OrtRuntimeClient {
     this._status = 'DISPOSED';
     this._provider = 'unknown';
     this._modelReady = false;
+    this._loadedPref = null;
   }
 }
 

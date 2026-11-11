@@ -32,6 +32,19 @@ export interface ModelOutputMeta {
   dims: number[][];
 }
 
+/** Waktu nyata satu job (ms), untuk melihat bottleneck di perangkat. */
+export interface SeparationTiming {
+  /** STFT + iSTFT + overlap-add (JavaScript) */
+  dspMs: number;
+  /** session.run (model ONNX) */
+  inferMs: number;
+  totalMs: number;
+  chunks: number;
+  segmentFrames: number;
+  overlap: number;
+  provider: ExecutionProvider;
+}
+
 export type SeparateOptionsPayload = {
   outputMode: 'vocals' | 'instrumental' | 'both';
   quality: 'economy' | 'balanced' | 'good';
@@ -99,6 +112,7 @@ export type WorkerResponse =
       jobId: string;
       vocals?: Float32Array[];
       instrumental?: Float32Array[];
+      timing?: SeparationTiming;
     }
   | {
       type: 'JOB_ERROR';

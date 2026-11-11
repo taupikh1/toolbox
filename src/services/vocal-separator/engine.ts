@@ -7,12 +7,11 @@ import { PRIMARY_MODEL } from './modelRegistry';
 import { vocalModelManager } from './modelManager';
 import { decodeAudioFile, encodeWav, validateAudioFile } from './audioUtils';
 import { ortRuntimeClient } from './runtimeClient';
-import type { SeparateOptionsPayload } from './workerMessages';
-import { runQualityGate } from './pure/qualityGate';
+import type { SeparateOptionsPayload, SeparationTiming } from './workerMessages';
+import { runQualityGate, snapshotInput } from './pure/qualityGate';
 import {
   getDeviceTier,
   getLimitsForTier,
-  getQualityConfig,
   getSegmentConfig,
   estimateProcessingTime,
   shouldWarnDuration,
@@ -42,6 +41,8 @@ export interface SeparationResult {
   sampleRate: number;
   mode: 'ai' | 'fast';
   warnings?: string[];
+  /** Rincian waktu nyata (hanya jalur AI): berapa lama DSP vs model. */
+  timing?: SeparationTiming & { wallMs: number; usedGpuRequest: boolean };
   metrics?: {
     rmsInput?: number;
     rmsVocals?: number;
@@ -62,6 +63,12 @@ export interface SeparateOptions {
   keepBass?: boolean;
   /** trim to first N seconds before process */
   trimToSec?: number;
+  /** Minta WebGPU (jauh lebih cepat bila didukung); otomatis jatuh ke CPU bila gagal. */
+  useGpu?: boolean;
+  /** Timpa overlap bawaan tier/kualitas (0..0.5). Lebih kecil = lebih cepat. */
+  overlapOverride?: number;
+  /** Timpa ukuran potongan (kelipatan 32, 32..256). Lebih besar = lebih cepat/hemat DSP, lebih boros memori. */
+  segmentFramesOverride?: number;
 }
 
 export function detectTier(): DeviceTier {
@@ -182,24 +189,41 @@ export async function separate(
     throw new Error('RUNTIME_NOT_READY: Init Runtime terlebih dahulu (atau gunakan Fast Mode)');
   }
 
-  if (!ortRuntimeClient.modelReady) {
-    onProgress({ phase: 'loading_model' });
-    await ortRuntimeClient.loadModel(PRIMARY_MODEL.id);
-  }
+  // Cuplikan input untuk quality gate: harus diambil sebelum buffer di-transfer ke worker.
+  const gateSnapshot = snapshotInput(channels);
+  const wantGpu = opts.useGpu === true;
+  onProgress({ phase: 'loading_model' });
+  await ortRuntimeClient.ensureModel(PRIMARY_MODEL.id, wantGpu ? 'webgpu' : 'wasm');
 
-  const qCfg = getQualityConfig(tier, quality);
   const seg = getSegmentConfig(tier, quality);
+  const overlap =
+    typeof opts.overlapOverride === 'number' && opts.overlapOverride >= 0
+      ? Math.min(0.5, opts.overlapOverride)
+      : seg.overlap;
+  const sf = opts.segmentFramesOverride;
+  const segmentFrames =
+    typeof sf === 'number' && Number.isInteger(sf) && sf >= 32 && sf <= 256 && sf % 32 === 0
+      ? sf
+      : seg.frames;
   const jobOpts: SeparateOptionsPayload = {
     outputMode,
     quality,
-    overlap: seg.overlap,
-    segmentFrames: seg.frames,
+    overlap,
+    segmentFrames,
   };
-  const transfer = channels.map((c) => c.buffer);
+  // Dengan GPU, kirim salinan (bukan transfer) supaya audio asli masih utuh
+  // bila GPU gagal di tengah jalan dan kita harus mengulang di CPU.
+  const buildTransfer = (chs: Float32Array[]) => chs.map((c) => c.buffer as ArrayBuffer);
 
   onProgress({ phase: 'inference', chunk: 0, totalChunks: 1, percent: 0 });
 
-  let result: { vocals?: Float32Array[]; instrumental?: Float32Array[] };
+  let result: {
+    vocals?: Float32Array[];
+    instrumental?: Float32Array[];
+    timing?: SeparationTiming;
+  };
+  const extraWarnings: string[] = [];
+  const wallStart = Date.now();
   // Breadcrumb: kalau iOS mematikan halaman saat inferensi (OOM), UI membacanya setelah reload.
   try {
     localStorage.setItem(
@@ -209,12 +233,12 @@ export async function separate(
   } catch {
     /* ignore */
   }
-  try {
-    result = await ortRuntimeClient.separate({
+  const runJob = (chs: Float32Array[], transferBuffers: boolean) =>
+    ortRuntimeClient.separate({
       sampleRate,
-      channels,
+      channels: chs,
       options: jobOpts,
-      transfer,
+      transfer: transferBuffers ? buildTransfer(chs) : undefined,
       signal,
       onJobProgress: (p) => {
         onProgress({
@@ -225,6 +249,19 @@ export async function separate(
         });
       },
     });
+  try {
+    try {
+      // GPU: kirim dengan salinan agar bisa diulang di CPU. CPU: transfer (hemat memori).
+      result = await runJob(channels, !wantGpu);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('CANCELLED') || msg === 'ABORTED' || !wantGpu) throw e;
+      // WebGPU gagal saat inferensi: ulangi sekali di CPU (WASM).
+      extraWarnings.push(`WebGPU gagal (${msg.slice(0, 120)}); diulang memakai CPU.`);
+      onProgress({ phase: 'loading_model' });
+      await ortRuntimeClient.ensureModel(PRIMARY_MODEL.id, 'wasm');
+      result = await runJob(channels, false);
+    }
   } catch (e) {
     if (e instanceof Error && e.message.includes('CANCELLED')) {
       onProgress({ phase: 'cancelled' });
@@ -240,6 +277,7 @@ export async function separate(
 
   const gate = runQualityGate({
     input: channels,
+    inputSnapshot: gateSnapshot,
     vocals: result.vocals,
     instrumental: result.instrumental,
   });
@@ -247,11 +285,15 @@ export async function separate(
     throw new Error(`QUALITY_GATE: ${gate.errors.join('; ')}`);
   }
 
+  const allWarnings = [...extraWarnings, ...gate.warnings];
   const out: SeparationResult = {
     durationSec,
     sampleRate,
     mode: 'ai',
-    warnings: gate.warnings.length ? gate.warnings : undefined,
+    warnings: allWarnings.length ? allWarnings : undefined,
+    timing: result.timing
+      ? { ...result.timing, wallMs: Date.now() - wallStart, usedGpuRequest: wantGpu }
+      : undefined,
     metrics: {
       rmsInput: gate.stats.input?.rms,
       rmsVocals: gate.stats.vocals?.rms,

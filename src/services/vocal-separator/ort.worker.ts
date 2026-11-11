@@ -19,19 +19,11 @@ import {
 } from './workerMessages';
 import { planChunks, chunkOverlapSamples, accumulateChunk, normalizeOverlap } from './pure/chunkPlanner';
 import { validateModelMarker } from './pure/modelMarker';
-import {
-  hannWindow,
-  stftChannel,
-  istftChannel,
-  sliceOneSided,
-  expandConjugateMirror,
-} from './pure/stft';
+import { StereoMdxDsp, isFastFftSupported } from './pure/fastStft';
 import {
   resolveTensorName,
   dimsCompatible,
-  readMdxOutput,
-  packMdxInput,
-  zeroLowBins,
+  checkMdxOutputLayout,
 } from './pure/mdxTensor';
 import type { Dim } from './pure/mdxTensor';
 
@@ -57,6 +49,8 @@ let activeProvider: ExecutionProvider = 'unknown';
 let ortVersion: string | undefined;
 let ortModule: typeof import('onnxruntime-web') | null = null;
 let session: import('onnxruntime-web').InferenceSession | null = null;
+/** Provider yang diminta saat session dibuat ('webgpu' atau 'wasm'). */
+let sessionWant: 'webgpu' | 'wasm' | null = null;
 let cancelJobId: string | null = null;
 let activeJobId: string | null = null;
 
@@ -70,6 +64,15 @@ function post(msg: WorkerResponse): void {
  * the first requested provider ran.
  */
 function probeActualProvider(sess: object, requested: readonly string[]): ExecutionProvider {
+  // ORT-web (JSEP) mengisi env.webgpu.device hanya bila backend WebGPU benar-benar hidup.
+  if (requested.includes('webgpu')) {
+    try {
+      const dev = (ortModule?.env as { webgpu?: { device?: unknown } } | undefined)?.webgpu?.device;
+      if (dev) return 'webgpu';
+    } catch {
+      /* getter bisa melempar bila belum diinisialisasi */
+    }
+  }
   const bag = sess as {
     handler?: { backendHint?: string; name?: string; constructor?: { name?: string } };
     backendHint?: string;
@@ -174,7 +177,8 @@ async function loadModel(
     post({ type: 'ERROR', requestId, code: 'NOT_READY', message: 'Init Runtime first' });
     return;
   }
-  if (session) {
+  const want: 'webgpu' | 'wasm' = preferred === 'webgpu' ? 'webgpu' : 'wasm';
+  if (session && sessionWant === want) {
     post({
       type: 'MODEL_READY',
       requestId,
@@ -189,6 +193,16 @@ async function loadModel(
       provider: activeProvider,
     });
     return;
+  }
+  if (session) {
+    // Provider berubah (mis. CPU -> GPU): lepas session lama dulu supaya memori tidak dobel.
+    try {
+      await session.release();
+    } catch {
+      /* ignore */
+    }
+    session = null;
+    sessionWant = null;
   }
 
   post({ type: 'MODEL_PROGRESS', requestId, phase: 'cache', message: 'Reading model from cache…' });
@@ -240,20 +254,41 @@ async function loadModel(
 
     post({ type: 'MODEL_PROGRESS', requestId, phase: 'session', percent: 50, message: 'Creating InferenceSession…' });
 
-    const providers: string[] = [];
-    if (preferred === 'webgpu') providers.push('webgpu');
-    providers.push('wasm');
+    let providers: string[] = want === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'];
 
     const ort = ortModule;
     const modelData = new Uint8Array(buf);
-    session = await ort.InferenceSession.create(modelData, {
-      executionProviders: providers,
+    const sessionOpts = {
       // Percobaan hemat memori untuk iPhone: optimasi 'basic' dan tanpa arena/pola memori.
       // NOT VERIFIED di perangkat; kalau session gagal dibuat, kembalikan ke 'all'.
-      graphOptimizationLevel: 'basic',
+      graphOptimizationLevel: 'basic' as const,
       enableCpuMemArena: false,
       enableMemPattern: false,
-    });
+    };
+    try {
+      session = await ort.InferenceSession.create(modelData, {
+        executionProviders: providers,
+        ...sessionOpts,
+      });
+    } catch (gpuErr) {
+      if (want !== 'webgpu') throw gpuErr;
+      // WebGPU gagal dibuat (adapter tidak ada / op tidak didukung): jatuh ke CPU (WASM).
+      post({
+        type: 'MODEL_PROGRESS',
+        requestId,
+        phase: 'session',
+        percent: 60,
+        message: 'WebGPU gagal, memakai CPU (WASM)…',
+      });
+      providers = ['wasm'];
+      session = await ort.InferenceSession.create(modelData, {
+        executionProviders: providers,
+        ...sessionOpts,
+      });
+    }
+    // Simpan permintaannya (bukan hasilnya): kalau WebGPU diminta lalu jatuh ke CPU,
+    // permintaan yang sama berikutnya tidak membuat ulang session yang pasti gagal lagi.
+    sessionWant = want;
 
     // Requested list is not the provider that ran. Probe, otherwise unknown
     // when WebGPU was in the list (ORT can fall back without throwing).
@@ -363,7 +398,6 @@ async function runSeparate(
     frames: framesPerSeg,
   });
 
-  const window = hannWindow(nFft);
   const outL = new Float32Array(sampleCount);
   const outR = new Float32Array(sampleCount);
   const weightL = new Float32Array(sampleCount);
@@ -415,6 +449,35 @@ async function runSeparate(
     });
     return;
   }
+  if (!isFastFftSupported(nFft)) {
+    post({
+      type: 'JOB_ERROR',
+      jobId,
+      code: 'BAD_MODEL_IO',
+      message: `nFft ${nFft} tidak didukung FFT cepat (harus 2^k atau 3·2^k)`,
+    });
+    return;
+  }
+  // STFT/iSTFT stereo cepat (22D): L+R satu FFT, FFT mixed-radix, tanpa spektrum perantara.
+  const dsp = new StereoMdxDsp(nFft, hop, dimF);
+  if (dsp.framesFor(plan.segmentSamples) !== framesPerSeg) {
+    post({
+      type: 'JOB_ERROR',
+      jobId,
+      code: 'STFT_FRAMES',
+      message: `STFT produced ${dsp.framesFor(plan.segmentSamples)} frames, model expects ${framesPerSeg}`,
+    });
+    return;
+  }
+  const segLen = plan.segmentSamples;
+  const segL = new Float32Array(segLen);
+  const segR = new Float32Array(segLen);
+  const waveL = new Float32Array(segLen);
+  const waveR = new Float32Array(segLen);
+  const inputData = new Float32Array(4 * dimF * framesPerSeg);
+  let dspMs = 0;
+  let inferMs = 0;
+  const tJob = performance.now();
 
   try {
     for (let ci = 0; ci < plan.totalChunks; ci++) {
@@ -425,40 +488,27 @@ async function runSeparate(
       }
 
       const spec = plan.chunks[ci];
-      const segLen = plan.segmentSamples;
-      const segL = new Float32Array(segLen);
-      const segR = new Float32Array(segLen);
       const copyLen = spec.end - spec.start;
+      let t0 = performance.now();
       segL.set(left.subarray(spec.start, spec.end));
       segR.set(right.subarray(spec.start, spec.end));
-
-      const stftL = stftChannel(segL, nFft, hop, window);
-      const stftR = stftChannel(segR, nFft, hop, window);
-      if (stftL.frames !== framesPerSeg || stftR.frames !== framesPerSeg) {
-        post({
-          type: 'JOB_ERROR',
-          jobId,
-          code: 'STFT_FRAMES',
-          message: `STFT produced ${stftL.frames} frames, model expects ${framesPerSeg}`,
-        });
-        return;
+      if (copyLen < segLen) {
+        // potongan terakhir: sisanya nol (buffer dipakai ulang, jadi harus dibersihkan)
+        segL.fill(0, copyLen);
+        segR.fill(0, copyLen);
       }
       const frames = framesPerSeg;
-
-      // One-sided bins only (DC .. dimF-1). Negative frequencies are not fed to MDX.
-      const lRe = sliceOneSided(stftL.re, frames, nFft, dimF);
-      const lIm = sliceOneSided(stftL.im, frames, nFft, dimF);
-      const rRe = sliceOneSided(stftR.re, frames, nFft, dimF);
-      const rIm = sliceOneSided(stftR.im, frames, nFft, dimF);
-      for (const a of [lRe, lIm, rRe, rIm]) zeroLowBins(a, frames, dimF);
-      const inputData = packMdxInput(lRe, lIm, rRe, rIm, frames, dimF);
-
+      // STFT -> langsung ke layout NCHW [1, 4, dimF, frames]; 3 bin terbawah dinolkan (UVR).
+      dsp.forward(segL, segR, frames, inputData);
       const tensor = new ortModule.Tensor('float32', inputData, [1, 4, dimF, frames]);
       const feeds: Record<string, import('onnxruntime-web').Tensor> = {
         [inputName]: tensor,
       };
+      dspMs += performance.now() - t0;
 
+      t0 = performance.now();
       const results = await session.run(feeds);
+      inferMs += performance.now() - t0;
       const outTensor = results[outputName];
       if (!outTensor || outTensor.data == null) {
         post({
@@ -471,27 +521,25 @@ async function runSeparate(
       }
 
       const outData = outTensor.data as ArrayLike<number>;
-      const parsed = readMdxOutput(outData, outTensor.dims, dimF, frames);
-      if (!parsed.ok) {
+      const layoutErr = checkMdxOutputLayout(outData.length, outTensor.dims, dimF, frames);
+      if (layoutErr) {
         post({
           type: 'JOB_ERROR',
           jobId,
           code: 'BAD_OUTPUT_SHAPE',
-          message: parsed.message,
+          message: layoutErr,
         });
         return;
       }
 
-      // Restore conjugate symmetry. Nyquist stays 0 (freq_pad). Do not double DC.
-      const fullL = expandConjugateMirror(parsed.channels.lRe, parsed.channels.lIm, frames, nFft, dimF);
-      const fullR = expandConjugateMirror(parsed.channels.rRe, parsed.channels.rIm, frames, nFft, dimF);
-      const waveL = istftChannel(fullL.re, fullL.im, frames, nFft, hop, window, segLen);
-      const waveR = istftChannel(fullR.re, fullR.im, frames, nFft, hop, window, segLen);
-
+      t0 = performance.now();
+      // iSTFT: konjugat dibangun langsung dari output model, L+R satu IFFT.
+      dsp.inverse(outData, frames, segLen, waveL, waveR);
       const fadeIn = spec.start > 0;
       const fadeOut = spec.end < sampleCount;
       accumulateChunk(outL, weightL, waveL, spec.start, copyLen, overlapSamples, fadeIn, fadeOut);
       accumulateChunk(outR, weightR, waveR, spec.start, copyLen, overlapSamples, fadeIn, fadeOut);
+      dspMs += performance.now() - t0;
 
       try {
         (tensor as { dispose?: () => void }).dispose?.();
@@ -545,6 +593,15 @@ async function runSeparate(
     const result: WorkerResponse = {
       type: 'JOB_RESULT',
       jobId,
+      timing: {
+        dspMs: Math.round(dspMs),
+        inferMs: Math.round(inferMs),
+        totalMs: Math.round(performance.now() - tJob),
+        chunks: plan.totalChunks,
+        segmentFrames: framesPerSeg,
+        overlap,
+        provider: activeProvider,
+      },
     };
     if (options.outputMode === 'vocals' || options.outputMode === 'both') {
       (result as { vocals?: Float32Array[] }).vocals = [vocL, vocR];
@@ -634,11 +691,8 @@ self.onmessage = async (ev: MessageEvent) => {
     case 'DISPOSE':
       disposed = true;
       runtimeReady = false;
-      try {
-        session = null;
-      } catch {
-        /* ignore */
-      }
+      session = null;
+      sessionWant = null;
       ortModule = null;
       post({ type: 'DISPOSED', requestId: req.requestId });
       break;
