@@ -15,6 +15,8 @@ import {
 export type ProgressCallback = (loaded: number, total: number) => void;
 export type StatusCallback = (status: ModelStatus, message?: string) => void;
 
+const LEGACY_MODEL_IDS = ['uvr-mdx-net-inst-hq-3'];
+
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', buffer);
   return Array.from(new Uint8Array(hash))
@@ -64,6 +66,14 @@ class VocalSeparatorModelManager {
   async checkCached(): Promise<boolean> {
     try {
       const cache = await caches.open(MODEL_CACHE_NAME);
+      // Model lama (sumbu waktu tetap, SHA berbeda) tidak dipakai lagi: bebaskan ~67 MB.
+      for (const legacy of LEGACY_MODEL_IDS) {
+        try {
+          await cache.delete(legacy);
+        } catch {
+          /* ignore */
+        }
+      }
       const res = await cache.match(PRIMARY_MODEL.id);
       if (!res) {
         this.setStatus('NOT_DOWNLOADED');

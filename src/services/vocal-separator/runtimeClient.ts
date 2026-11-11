@@ -196,7 +196,7 @@ export class OrtRuntimeClient {
     }
   }
 
-  async loadModel(cacheKey = 'uvr-mdx-net-inst-hq-3'): Promise<void> {
+  async loadModel(cacheKey = 'inst-hq-3-dynt'): Promise<void> {
     const res = await this.send(
       { type: 'LOAD_MODEL', requestId: newId(), cacheKey },
       120_000,

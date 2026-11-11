@@ -37,6 +37,8 @@ export type SeparateOptionsPayload = {
   quality: 'economy' | 'balanced' | 'good';
   /** overlap fraction 0..0.5; derived from quality if omitted */
   overlap?: number;
+  /** Frame per potongan (kelipatan 32, 32..256). Default 256. Lebih kecil = lebih hemat memori. */
+  segmentFrames?: number;
 };
 
 /** Main → Worker */
@@ -170,6 +172,10 @@ export function validateSeparatePayload(msg: {
   if (!opt || typeof opt !== 'object') return 'INVALID_OPTIONS';
   const mode = (opt as SeparateOptionsPayload).outputMode;
   if (mode !== 'vocals' && mode !== 'instrumental' && mode !== 'both') return 'INVALID_OPTIONS';
+  const sf = (opt as SeparateOptionsPayload).segmentFrames;
+  if (sf !== undefined) {
+    if (!Number.isInteger(sf) || sf < 32 || sf > 256 || sf % 32 !== 0) return 'INVALID_SEGMENT_FRAMES';
+  }
   return null;
 }
 

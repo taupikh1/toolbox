@@ -26,11 +26,17 @@ import {
   sliceOneSided,
   expandConjugateMirror,
 } from './pure/stft';
-import { resolveTensorName, dimsCompatible, readMdxOutput, packMdxInput } from './pure/mdxTensor';
+import {
+  resolveTensorName,
+  dimsCompatible,
+  readMdxOutput,
+  packMdxInput,
+  zeroLowBins,
+} from './pure/mdxTensor';
 import type { Dim } from './pure/mdxTensor';
 
 const MODEL_CACHE_NAME = 'vocal-separator-models-v1';
-const DEFAULT_CACHE_KEY = 'uvr-mdx-net-inst-hq-3';
+const DEFAULT_CACHE_KEY = 'inst-hq-3-dynt';
 
 // Registry defaults (ASSUMPTION until session confirms)
 const REG = {
@@ -42,7 +48,7 @@ const REG = {
   primaryStem: 'instrumental' as const,
   sampleRate: 44100,
   sizeBytes: 66_759_214,
-  sha256: '317554b07fe1ea5279a77f2b1520a41ea4b93432560c4ffd08792c30fddf9adc',
+  sha256: '03ceedd8ce972685ae4b4905befa31637f25a90542562ce7367dd3555493c748',
 };
 
 let disposed = false;
@@ -339,7 +345,7 @@ async function runSeparate(
   const hop = REG.hopLength;
   const dimT = REG.dimT;
   const dimF = REG.dimF;
-  const framesPerSeg = 2 ** dimT;
+  const framesPerSeg = options.segmentFrames ?? 2 ** dimT;
   const overlap =
     options.overlap ??
     (options.quality === 'economy' ? 0.1 : options.quality === 'good' ? 0.35 : 0.25);
@@ -354,6 +360,7 @@ async function runSeparate(
     dimT,
     nFft,
     overlap,
+    frames: framesPerSeg,
   });
 
   const window = hannWindow(nFft);
@@ -443,6 +450,7 @@ async function runSeparate(
       const lIm = sliceOneSided(stftL.im, frames, nFft, dimF);
       const rRe = sliceOneSided(stftR.re, frames, nFft, dimF);
       const rIm = sliceOneSided(stftR.im, frames, nFft, dimF);
+      for (const a of [lRe, lIm, rRe, rIm]) zeroLowBins(a, frames, dimF);
       const inputData = packMdxInput(lRe, lIm, rRe, rIm, frames, dimF);
 
       const tensor = new ortModule.Tensor('float32', inputData, [1, 4, dimF, frames]);

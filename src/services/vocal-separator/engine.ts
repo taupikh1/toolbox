@@ -13,6 +13,7 @@ import {
   getDeviceTier,
   getLimitsForTier,
   getQualityConfig,
+  getSegmentConfig,
   estimateProcessingTime,
   shouldWarnDuration,
   trimToSeconds,
@@ -187,10 +188,12 @@ export async function separate(
   }
 
   const qCfg = getQualityConfig(tier, quality);
+  const seg = getSegmentConfig(tier, quality);
   const jobOpts: SeparateOptionsPayload = {
     outputMode,
     quality,
-    overlap: qCfg.overlap,
+    overlap: seg.overlap,
+    segmentFrames: seg.frames,
   };
   const transfer = channels.map((c) => c.buffer);
 

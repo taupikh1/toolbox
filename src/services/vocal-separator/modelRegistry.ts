@@ -52,17 +52,16 @@ export interface VocalSeparatorModel {
 }
 
 export const PRIMARY_MODEL: VocalSeparatorModel = {
-  id: 'uvr-mdx-net-inst-hq-3',
+  id: 'inst-hq-3-dynt',
   name: 'UVR-MDX-NET-Inst_HQ_3',
-  version: '1.0',
+  version: '1.0-dynt',
   description:
-    'High-quality 2-stem separator (primary: Instrumental). KUIELab MDX-Net. Official UVR model.',
-  url: 'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx',
-  mirrorUrl:
-    'https://huggingface.co/notabilia/uvr5-models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx',
+    'High-quality 2-stem separator (primary: Instrumental). Bobot asli UVR-MDX-NET-Inst_HQ_3; sumbu waktu input dibuat bebas (kelipatan 32 frame) agar bisa diproses per potongan kecil di perangkat ber-memori terbatas.',
+  url: 'https://huggingface.co/uddompang/kamvox-voice-separator/resolve/main/inst-hq-3.onnx',
+  mirrorUrl: 'https://huggingface.co/uddompang/kamvox-voice-separator/resolve/main/inst-hq-3.onnx?download=true',
   sizeBytes: 66_759_214,
   sizeLabel: '66.8 MB',
-  sha256: '317554b07fe1ea5279a77f2b1520a41ea4b93432560c4ffd08792c30fddf9adc',
+  sha256: '03ceedd8ce972685ae4b4905befa31637f25a90542562ce7367dd3555493c748',
   stems: ['vocals', 'instrumental'],
   sampleRate: 44100,
   preprocessing: {
