@@ -11,6 +11,8 @@ export interface ChunkPlanConfig {
   sampleCount: number;
   hopLength: number;
   dimT: number; // log2 of frames, e.g. 8 → 256
+  /** Jumlah frame per potongan; bila ada, menggantikan 2^dimT (model sumbu-waktu-bebas). */
+  frames?: number;
   nFft: number;
   overlap: number; // 0..0.5
 }
@@ -31,7 +33,7 @@ export interface ChunkPlan {
 }
 
 export function planChunks(cfg: ChunkPlanConfig): ChunkPlan {
-  const frames = 2 ** cfg.dimT;
+  const frames = cfg.frames ?? 2 ** cfg.dimT;
   const segmentSamples = cfg.hopLength * (frames - 1);
   const overlap = Math.max(0, Math.min(0.5, cfg.overlap));
   const hopSamples = Math.max(1, Math.floor(segmentSamples * (1 - overlap)));

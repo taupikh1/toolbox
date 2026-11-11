@@ -153,3 +153,15 @@ export function packMdxInput(
   }
   return out;
 }
+
+/**
+ * UVR menolkan 3 bin frekuensi pertama pada spektrum input sebelum masuk model
+ * (spek[:, :, :3, :] *= 0). `data` berlayout frame-major dengan stride `dimF`.
+ */
+export function zeroLowBins(data: Float32Array, frames: number, dimF: number, bins = 3): void {
+  const n = Math.min(bins, dimF);
+  for (let f = 0; f < frames; f++) {
+    const base = f * dimF;
+    for (let b = 0; b < n; b++) data[base + b] = 0;
+  }
+}

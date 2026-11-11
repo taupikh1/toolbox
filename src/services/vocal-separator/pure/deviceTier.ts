@@ -24,6 +24,12 @@ export interface QualityConfig {
 export interface TierLimits {
   maxDurationSec: number;
   batchSize: number;
+  /** Frame per potongan inferensi (kelipatan 32). Lebih kecil = jauh lebih hemat memori. */
+  segmentFrames: number;
+  /** Overlap minimum antar potongan agar sambungan tepi tidak terdengar. */
+  minOverlap: number;
+  /** Pengali estimasi waktu: potongan kecil + overlap besar = lebih lambat. */
+  timeScale: number;
   qualities: Record<QualityLevel, QualityConfig>;
 }
 
@@ -32,6 +38,9 @@ export const TIER_LIMITS: Record<DeviceTier, TierLimits> = {
   low: {
     maxDurationSec: 60,
     batchSize: 1,
+    segmentFrames: 64,
+    minOverlap: 0.5,
+    timeScale: 1.8,
     qualities: {
       economy: {
         quality: 'economy',
@@ -56,6 +65,9 @@ export const TIER_LIMITS: Record<DeviceTier, TierLimits> = {
   mid: {
     maxDurationSec: 180,
     batchSize: 1,
+    segmentFrames: 128,
+    minOverlap: 0.35,
+    timeScale: 1.3,
     qualities: {
       economy: {
         quality: 'economy',
@@ -80,6 +92,9 @@ export const TIER_LIMITS: Record<DeviceTier, TierLimits> = {
   high: {
     maxDurationSec: 360,
     batchSize: 1,
+    segmentFrames: 256,
+    minOverlap: 0,
+    timeScale: 1,
     qualities: {
       economy: {
         quality: 'economy',
@@ -139,13 +154,23 @@ export function getQualityConfig(
   return TIER_LIMITS[tier].qualities[quality];
 }
 
+/** Frame per potongan dan overlap efektif untuk tier + kualitas. Pure. */
+export function getSegmentConfig(
+  tier: DeviceTier,
+  quality: QualityLevel,
+): { frames: number; overlap: number } {
+  const lim = TIER_LIMITS[tier];
+  const overlap = Math.min(0.5, Math.max(lim.qualities[quality].overlap, lim.minOverlap));
+  return { frames: lim.segmentFrames, overlap };
+}
+
 /** Rough wall-time estimate in seconds (range). INITIAL ASSUMPTION factors. */
 export function estimateProcessingTime(
   durationSec: number,
   tier: DeviceTier,
   quality: QualityLevel,
 ): { minSec: number; maxSec: number; label: string } {
-  const factor = TIER_LIMITS[tier].qualities[quality].timeFactor;
+  const factor = TIER_LIMITS[tier].qualities[quality].timeFactor * TIER_LIMITS[tier].timeScale;
   const mid = durationSec * factor;
   const minSec = Math.max(1, Math.round(mid * 0.7));
   const maxSec = Math.max(minSec + 1, Math.round(mid * 1.4));
