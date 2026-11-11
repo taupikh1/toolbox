@@ -74,6 +74,41 @@ export interface MdxChannels {
 }
 
 /**
+ * Validasi layout output model tanpa menyalin data. Mengembalikan pesan error
+ * atau null bila layout cocok dengan [1, 4, dimF, frames] / [4, dimF, frames].
+ */
+export function checkMdxOutputLayout(
+  dataLength: number,
+  dims: readonly number[] | undefined,
+  dimF: number,
+  frames: number,
+): string | null {
+  const need = 4 * dimF * frames;
+  if (dimF <= 0 || frames <= 0) return `invalid dimF=${dimF} frames=${frames}`;
+  if (dataLength < need) return `output length ${dataLength} < ${need}`;
+  if (dims && dims.length > 0) {
+    const shape = dims.filter((d) => typeof d === 'number');
+    if (shape.length === 4) {
+      const [b, c, f, t] = shape;
+      if (b !== 1) return `batch ${b} != 1`;
+      if (c !== 4) return `channels ${c} != 4`;
+      if (f !== dimF) return `freq ${f} != dimF ${dimF}`;
+      if (t !== frames) return `time ${t} != frames ${frames}`;
+    } else if (shape.length === 3) {
+      const [c, f, t] = shape;
+      if (c !== 4) return `channels ${c} != 4`;
+      if (f !== dimF) return `freq ${f} != dimF ${dimF}`;
+      if (t !== frames) return `time ${t} != frames ${frames}`;
+    } else {
+      return `unexpected output rank ${shape.length} dims=${JSON.stringify(dims)}`;
+    }
+  } else if (dataLength !== need) {
+    return `output length ${dataLength} != ${need} and dims are missing`;
+  }
+  return null;
+}
+
+/**
  * Read a model output into 4 one-sided channels.
  * Accepts [1, 4, dimF, frames] or [4, dimF, frames].
  * Rejects a wrong rank, channel count, frequency count, or time count
@@ -85,35 +120,8 @@ export function readMdxOutput(
   dimF: number,
   frames: number,
 ): { ok: true; channels: MdxChannels } | { ok: false; message: string } {
-  const need = 4 * dimF * frames;
-  if (dimF <= 0 || frames <= 0) {
-    return { ok: false, message: `invalid dimF=${dimF} frames=${frames}` };
-  }
-  if (data.length < need) {
-    return { ok: false, message: `output length ${data.length} < ${need}` };
-  }
-  if (dims && dims.length > 0) {
-    const shape = dims.filter((d) => typeof d === 'number');
-    if (shape.length === 4) {
-      const [b, c, f, t] = shape;
-      if (b !== 1) return { ok: false, message: `batch ${b} != 1` };
-      if (c !== 4) return { ok: false, message: `channels ${c} != 4` };
-      if (f !== dimF) return { ok: false, message: `freq ${f} != dimF ${dimF}` };
-      if (t !== frames) return { ok: false, message: `time ${t} != frames ${frames}` };
-    } else if (shape.length === 3) {
-      const [c, f, t] = shape;
-      if (c !== 4) return { ok: false, message: `channels ${c} != 4` };
-      if (f !== dimF) return { ok: false, message: `freq ${f} != dimF ${dimF}` };
-      if (t !== frames) return { ok: false, message: `time ${t} != frames ${frames}` };
-    } else {
-      return { ok: false, message: `unexpected output rank ${shape.length} dims=${JSON.stringify(dims)}` };
-    }
-  } else if (data.length !== need) {
-    return {
-      ok: false,
-      message: `output length ${data.length} != ${need} and dims are missing`,
-    };
-  }
+  const err = checkMdxOutputLayout(data.length, dims, dimF, frames);
+  if (err) return { ok: false, message: err };
 
   const lRe = new Float32Array(frames * dimF);
   const lIm = new Float32Array(frames * dimF);

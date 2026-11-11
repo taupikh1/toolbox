@@ -98,8 +98,36 @@ export function correlation(a: Float32Array, b: Float32Array): number {
   return cov / denom;
 }
 
+/**
+ * Cuplikan kecil dari input yang dibuat SEBELUM buffer audio dikirim ke worker.
+ * Buffer yang di-transfer menjadi kosong (detached) di thread utama, sehingga gate
+ * yang membaca `input` sesudahnya melihat RMS 0 dan salah memberi peringatan
+ * "model tidak memisahkan" / "instrumental terlalu agresif".
+ */
+export interface GateInputSnapshot {
+  stats: StemStats;
+  /** Sampel kanal pertama pada indeks 0, step, 2·step, … */
+  sampled0: Float32Array;
+  step: number;
+}
+
+export function strided(a: Float32Array, step: number, n = a.length): Float32Array {
+  const len = Math.min(n, a.length);
+  const out = new Float32Array(Math.ceil(len / step));
+  for (let i = 0, j = 0; i < len; i += step, j++) out[j] = a[i];
+  return out;
+}
+
+export function snapshotInput(channels: Float32Array[]): GateInputSnapshot {
+  const ch0 = channels[0] ?? new Float32Array(0);
+  const step = Math.max(1, Math.floor(ch0.length / 20000));
+  return { stats: computeStats(channels), sampled0: strided(ch0, step), step };
+}
+
 export function runQualityGate(opts: {
   input: Float32Array[];
+  /** Bila ada, dipakai menggantikan `input` (yang mungkin sudah detached). */
+  inputSnapshot?: GateInputSnapshot;
   vocals?: Float32Array[];
   instrumental?: Float32Array[];
 }): QualityGateResult {
@@ -107,7 +135,7 @@ export function runQualityGate(opts: {
   const errors: string[] = [];
   const stats: QualityGateResult['stats'] = {};
 
-  stats.input = computeStats(opts.input);
+  stats.input = opts.inputSnapshot ? opts.inputSnapshot.stats : computeStats(opts.input);
   if (stats.input.hasNaN || stats.input.hasInf) {
     errors.push('Input mengandung NaN/Inf');
   }
@@ -155,13 +183,19 @@ export function runQualityGate(opts: {
   }
 
   let instrumentalCorrelation: number | undefined;
-  if (opts.instrumental && opts.input?.[0] && opts.instrumental[0]) {
+  if (opts.inputSnapshot && opts.instrumental?.[0]) {
+    const snap = opts.inputSnapshot;
+    instrumentalCorrelation = correlation(
+      snap.sampled0,
+      strided(opts.instrumental[0], snap.step, snap.sampled0.length * snap.step),
+    );
+  } else if (opts.instrumental && opts.input?.[0] && opts.instrumental[0]) {
     instrumentalCorrelation = correlation(opts.input[0], opts.instrumental[0]);
-    if (instrumentalCorrelation >= HIGH_CORRELATION) {
-      warnings.push(
-        'Model tampak tidak memisahkan (instrumental hampir identik dengan input)',
-      );
-    }
+  }
+  if (instrumentalCorrelation !== undefined && instrumentalCorrelation >= HIGH_CORRELATION) {
+    warnings.push(
+      'Model tampak tidak memisahkan (instrumental hampir identik dengan input)',
+    );
   }
 
   return {
