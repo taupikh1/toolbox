@@ -19,6 +19,7 @@ import {
   getDurationWarning,
   getTimeEstimate,
   TRIM_TEST_SEC,
+  consumeInferenceCrash,
   type SeparationProgress,
 } from '../../services/vocal-separator/engine';
 import type { QualityLevel } from '../../services/vocal-separator/pure/deviceTier';
@@ -80,6 +81,15 @@ export default function VocalSeparator() {
       setDlProgress({ loaded, total });
     });
     vocalModelManager.checkCached();
+    const crashed = consumeInferenceCrash();
+    if (crashed) {
+      setError(
+        'Proses AI sebelumnya terhenti mendadak' +
+          (crashed.durationSec ? ` (audio ${crashed.durationSec} dtk)` : '') +
+          ': browser kemungkinan kehabisan memori. Coba aktifkan "Trim 60s pertama" atau "Economy", atau pakai Fast Mode (tanpa AI).',
+      );
+      setSuggestFast(true);
+    }
     return () => {
       unsubS();
       unsubP();
