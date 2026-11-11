@@ -197,6 +197,15 @@ export async function separate(
   onProgress({ phase: 'inference', chunk: 0, totalChunks: 1, percent: 0 });
 
   let result: { vocals?: Float32Array[]; instrumental?: Float32Array[] };
+  // Breadcrumb: kalau iOS mematikan halaman saat inferensi (OOM), UI membacanya setelah reload.
+  try {
+    localStorage.setItem(
+      INFERENCE_BREADCRUMB_KEY,
+      JSON.stringify({ t: Date.now(), durationSec: Math.round(durationSec), tier, quality }),
+    );
+  } catch {
+    /* ignore */
+  }
   try {
     result = await ortRuntimeClient.separate({
       sampleRate,
@@ -219,6 +228,8 @@ export async function separate(
       throw new Error('ABORTED');
     }
     throw e;
+  } finally {
+    clearInferenceBreadcrumb();
   }
 
   if (signal?.aborted) throw new Error('ABORTED');
@@ -260,6 +271,29 @@ export async function separate(
 
   onProgress({ phase: 'done' });
   return out;
+}
+
+export const INFERENCE_BREADCRUMB_KEY = 'vocalSep.inferenceRunning';
+
+export function clearInferenceBreadcrumb(): void {
+  try {
+    localStorage.removeItem(INFERENCE_BREADCRUMB_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Dipanggil saat UI dibuka: true bila proses AI sebelumnya mati mendadak (tanpa selesai/error). */
+export function consumeInferenceCrash(): { durationSec?: number; quality?: string } | null {
+  try {
+    const raw = localStorage.getItem(INFERENCE_BREADCRUMB_KEY);
+    if (!raw) return null;
+    localStorage.removeItem(INFERENCE_BREADCRUMB_KEY);
+    const v = JSON.parse(raw) as { durationSec?: number; quality?: string };
+    return v ?? {};
+  } catch {
+    return null;
+  }
 }
 
 export { PRIMARY_MODEL, TRIM_TEST_SEC };

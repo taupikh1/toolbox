@@ -242,7 +242,11 @@ async function loadModel(
     const modelData = new Uint8Array(buf);
     session = await ort.InferenceSession.create(modelData, {
       executionProviders: providers,
-      graphOptimizationLevel: 'all',
+      // Percobaan hemat memori untuk iPhone: optimasi 'basic' dan tanpa arena/pola memori.
+      // NOT VERIFIED di perangkat; kalau session gagal dibuat, kembalikan ke 'all'.
+      graphOptimizationLevel: 'basic',
+      enableCpuMemArena: false,
+      enableMemPattern: false,
     });
 
     // Requested list is not the provider that ran. Probe, otherwise unknown
@@ -483,6 +487,7 @@ async function runSeparate(
 
       try {
         (tensor as { dispose?: () => void }).dispose?.();
+        (outTensor as { dispose?: () => void }).dispose?.();
       } catch {
         /* ignore */
       }
